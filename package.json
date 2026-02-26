@@ -1,0 +1,51 @@
+{
+  "name": "shopcircle-orbit",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Lightweight analytics SDK for ShopCircle Orbit. Track events, identify users, and measure engagement.",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "analytics",
+    "tracking",
+    "events",
+    "shopcircle",
+    "orbit"
+  ],
+  "author": "ShopCircle",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shopcircle/orbit-sdk"
+  },
+  "homepage": "https://github.com/shopcircle/orbit-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/shopcircle/orbit-sdk/issues"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  }
+}
