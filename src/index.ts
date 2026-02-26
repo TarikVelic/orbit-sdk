@@ -1,6 +1,15 @@
 const SDK_NAME = "shopcircle-orbit"
 const SDK_VERSION = "1.0.2"
 
+// ─── Constants ─────────────────────────────────────────────────────────────────
+
+const FLUSH_INTERVAL_MS = 2000
+const MAX_BATCH_SIZE = 10
+const MAX_QUEUE_SIZE = 1000
+const MAX_RETRIES = 3
+const BASE_RETRY_DELAY_MS = 1000
+const REQUEST_TIMEOUT_MS = 10000
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface OrbitOptions {
@@ -26,6 +35,11 @@ export interface IdentifyTraits {
 
 export type Properties = Record<string, unknown>
 
+interface EventPayload {
+  type: string
+  payload: Record<string, unknown>
+}
+
 // ─── SDK ──────────────────────────────────────────────────────────────────────
 
 export class ShopCircleOrbit {
@@ -35,13 +49,16 @@ export class ShopCircleOrbit {
   private trackOutgoingLinks: boolean
   private trackAttributes: boolean
   private profileId: string | null = null
-  private queue: Array<() => Promise<void>> = []
-  private flushing = false
   private destroyed = false
+
+  // Batching state
+  private pendingEvents: EventPayload[] = []
+  private flushTimer: ReturnType<typeof setTimeout> | null = null
 
   // Stored references for cleanup
   private popstateHandler: (() => void) | null = null
   private clickHandler: ((e: MouseEvent) => void) | null = null
+  private beforeUnloadHandler: (() => void) | null = null
   private lastPath: string | null = null
   private originalPushState: typeof history.pushState | null = null
   private originalReplaceState: typeof history.replaceState | null = null
@@ -60,6 +77,7 @@ export class ShopCircleOrbit {
 
     if (typeof window !== "undefined") {
       this.setupAutoTracking()
+      this.setupBeforeUnload()
     }
   }
 
@@ -72,18 +90,16 @@ export class ShopCircleOrbit {
    * orbit.track("button_clicked", { label: "Sign Up", variant: "primary" })
    */
   track(name: string, properties?: Properties): void {
-    this.enqueue(() =>
-      this.send({
-        type: "track",
-        payload: {
-          name,
-          properties: {
-            ...this.getPageContext(),
-            ...properties,
-          },
+    this.addEvent({
+      type: "track",
+      payload: {
+        name,
+        properties: {
+          ...this.getPageContext(),
+          ...properties,
         },
-      })
-    )
+      },
+    })
   }
 
   /**
@@ -97,19 +113,17 @@ export class ShopCircleOrbit {
 
     const { firstName, lastName, email, avatar, ...rest } = traits || {}
 
-    this.enqueue(() =>
-      this.send({
-        type: "identify",
-        payload: {
-          profileId,
-          firstName,
-          lastName,
-          email,
-          avatar,
-          properties: Object.keys(rest).length > 0 ? rest : undefined,
-        },
-      })
-    )
+    this.addEvent({
+      type: "identify",
+      payload: {
+        profileId,
+        firstName,
+        lastName,
+        email,
+        avatar,
+        properties: Object.keys(rest).length > 0 ? rest : undefined,
+      },
+    })
   }
 
   /**
@@ -120,10 +134,20 @@ export class ShopCircleOrbit {
   }
 
   /**
-   * Clean up event listeners. Call this when unmounting in SPA frameworks.
+   * Clean up event listeners and flush remaining events.
+   * Call this when unmounting in SPA frameworks.
    */
   destroy(): void {
     this.destroyed = true
+
+    // Flush any remaining events before tearing down
+    this.flushBatch()
+
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer)
+      this.flushTimer = null
+    }
+
     if (typeof window === "undefined") return
 
     if (this.popstateHandler) {
@@ -131,6 +155,9 @@ export class ShopCircleOrbit {
     }
     if (this.clickHandler) {
       document.removeEventListener("click", this.clickHandler, true)
+    }
+    if (this.beforeUnloadHandler) {
+      window.removeEventListener("beforeunload", this.beforeUnloadHandler)
     }
     if (this.originalPushState) {
       history.pushState = this.originalPushState
@@ -170,17 +197,14 @@ export class ShopCircleOrbit {
   }
 
   private observeNavigation(): void {
-    // Listen for popstate (back/forward)
     this.popstateHandler = () => this.trackScreenView()
     window.addEventListener("popstate", this.popstateHandler)
 
-    // Monkey-patch pushState/replaceState to detect SPA navigations
     this.originalPushState = history.pushState.bind(history)
     this.originalReplaceState = history.replaceState.bind(history)
 
     history.pushState = (...args) => {
       this.originalPushState!(...args)
-      // Small delay to let the URL update
       setTimeout(() => this.trackScreenView(), 0)
     }
 
@@ -195,7 +219,6 @@ export class ShopCircleOrbit {
       const target = (e.target as Element)?.closest?.("a, [data-orbit-event]")
       if (!target) return
 
-      // Track outgoing links
       if (this.trackOutgoingLinks && target.tagName === "A") {
         const href = (target as HTMLAnchorElement).href
         if (href && this.isExternalLink(href)) {
@@ -206,7 +229,6 @@ export class ShopCircleOrbit {
         }
       }
 
-      // Track data-orbit-* attributes
       if (this.trackAttributes) {
         const eventName = target.getAttribute("data-orbit-event")
         if (eventName) {
@@ -224,23 +246,95 @@ export class ShopCircleOrbit {
     document.addEventListener("click", this.clickHandler, true)
   }
 
-  // ─── Network ──────────────────────────────────────────────────────────
+  // ─── beforeunload ──────────────────────────────────────────────────────
 
-  private async send(body: {
-    type: string
-    payload: Record<string, unknown>
-  }): Promise<void> {
+  private setupBeforeUnload(): void {
+    this.beforeUnloadHandler = () => {
+      if (this.pendingEvents.length === 0) return
+
+      const events = this.drainPendingEvents()
+      const body = JSON.stringify({
+        events,
+        clientId: this.clientId,
+        sdkName: SDK_NAME,
+        sdkVersion: SDK_VERSION,
+      })
+
+      const url = `${this.apiUrl}/api/track/batch`
+
+      if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+        const blob = new Blob([body], { type: "application/json" })
+        navigator.sendBeacon(url, blob)
+      }
+    }
+    window.addEventListener("beforeunload", this.beforeUnloadHandler)
+  }
+
+  // ─── Batching & Network ─────────────────────────────────────────────────
+
+  private addEvent(event: EventPayload): void {
     if (this.destroyed) return
 
-    // Inject profileId if set
-    if (this.profileId && !body.payload.profileId) {
-      body.payload.profileId = this.profileId
+    if (this.profileId && !event.payload.profileId) {
+      event.payload.profileId = this.profileId
     }
 
-    const url = `${this.apiUrl}/api/track`
+    if (this.pendingEvents.length >= MAX_QUEUE_SIZE) {
+      const overflow = this.pendingEvents.length - MAX_QUEUE_SIZE + 1
+      this.pendingEvents.splice(0, overflow)
+    }
+
+    this.pendingEvents.push(event)
+
+    if (this.pendingEvents.length >= MAX_BATCH_SIZE) {
+      this.flushBatch()
+    } else {
+      this.scheduleFlush()
+    }
+  }
+
+  private scheduleFlush(): void {
+    if (this.flushTimer !== null) return
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null
+      this.flushBatch()
+    }, FLUSH_INTERVAL_MS)
+  }
+
+  private drainPendingEvents(): EventPayload[] {
+    const events = this.pendingEvents
+    this.pendingEvents = []
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer)
+      this.flushTimer = null
+    }
+    return events
+  }
+
+  private flushBatch(): void {
+    const events = this.drainPendingEvents()
+    if (events.length === 0) return
+
+    if (events.length === 1) {
+      this.sendWithRetry(`${this.apiUrl}/api/track`, events[0])
+      return
+    }
+
+    this.sendWithRetry(`${this.apiUrl}/api/track/batch`, { events })
+  }
+
+  private async sendWithRetry(
+    url: string,
+    body: unknown,
+    attempt = 0
+  ): Promise<void> {
+    if (this.destroyed && attempt > 0) return
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
 
     try {
-      await fetch(url, {
+      const response = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -249,30 +343,29 @@ export class ShopCircleOrbit {
           "shopcircle-sdk-version": SDK_VERSION,
         },
         body: JSON.stringify(body),
+        signal: controller.signal,
         keepalive: true,
       })
+
+      clearTimeout(timeoutId)
+
+      if (response.status >= 400 && response.status < 500) return
+
+      if (response.status >= 500 && attempt < MAX_RETRIES) {
+        await this.delay(BASE_RETRY_DELAY_MS * Math.pow(2, attempt))
+        return this.sendWithRetry(url, body, attempt + 1)
+      }
     } catch {
-      // Silently fail - analytics should never break the app
+      clearTimeout(timeoutId)
+      if (attempt < MAX_RETRIES) {
+        await this.delay(BASE_RETRY_DELAY_MS * Math.pow(2, attempt))
+        return this.sendWithRetry(url, body, attempt + 1)
+      }
     }
   }
 
-  // ─── Queue ────────────────────────────────────────────────────────────
-
-  private enqueue(fn: () => Promise<void>): void {
-    this.queue.push(fn)
-    this.flush()
-  }
-
-  private async flush(): Promise<void> {
-    if (this.flushing) return
-    this.flushing = true
-
-    while (this.queue.length > 0) {
-      const fn = this.queue.shift()!
-      await fn()
-    }
-
-    this.flushing = false
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────
