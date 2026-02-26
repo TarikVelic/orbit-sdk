@@ -1,5 +1,5 @@
 const SDK_NAME = "shopcircle-orbit"
-const SDK_VERSION = "1.0.0"
+const SDK_VERSION = "1.0.2"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
