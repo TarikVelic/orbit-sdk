@@ -47,8 +47,5 @@
   "devDependencies": {
     "tsup": "^8.0.0",
     "typescript": "^5.0.0"
-  },
-  "dependencies": {
-    "shopcircle-orbit": "^1.0.1"
   }
 }
