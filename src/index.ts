@@ -244,9 +244,9 @@ export class ShopCircleOrbit {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "openpanel-client-id": this.clientId,
-          "openpanel-sdk-name": SDK_NAME,
-          "openpanel-sdk-version": SDK_VERSION,
+          "shopcircle-client-id": this.clientId,
+          "shopcircle-sdk-name": SDK_NAME,
+          "shopcircle-sdk-version": SDK_VERSION,
         },
         body: JSON.stringify(body),
         keepalive: true,
