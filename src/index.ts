@@ -17,6 +17,8 @@ export interface OrbitOptions {
   clientId: string
   /** Base URL of your analytics panel (e.g. "https://analytics.yoursite.com") */
   apiUrl?: string
+  /** Client-generated device ID for cross-session fingerprinting. When provided, overrides IP+UA based device identification on the server. */
+  deviceId?: string
   /** Automatically track page/screen views (default: true) */
   trackScreenViews?: boolean
   /** Automatically track clicks on outgoing links (default: false) */
@@ -45,6 +47,7 @@ interface EventPayload {
 export class ShopCircleOrbit {
   private clientId: string
   private apiUrl: string
+  private deviceId: string | null = null
   private trackScreenViews: boolean
   private trackOutgoingLinks: boolean
   private trackAttributes: boolean
@@ -66,6 +69,7 @@ export class ShopCircleOrbit {
   constructor(options: OrbitOptions) {
     this.clientId = options.clientId
     this.apiUrl = (options.apiUrl || "").replace(/\/$/, "")
+    this.deviceId = options.deviceId || null
     this.trackScreenViews = options.trackScreenViews ?? true
     this.trackOutgoingLinks = options.trackOutgoingLinks ?? false
     this.trackAttributes = options.trackAttributes ?? false
@@ -124,6 +128,14 @@ export class ShopCircleOrbit {
         properties: Object.keys(rest).length > 0 ? rest : undefined,
       },
     })
+  }
+
+  /**
+   * Set or update the client-generated device ID at runtime.
+   * Useful when the ID is resolved asynchronously (e.g. via FingerprintJS).
+   */
+  setDeviceId(deviceId: string): void {
+    this.deviceId = deviceId
   }
 
   /**
@@ -277,6 +289,10 @@ export class ShopCircleOrbit {
 
     if (this.profileId && !event.payload.profileId) {
       event.payload.profileId = this.profileId
+    }
+
+    if (this.deviceId) {
+      event.payload.deviceId = this.deviceId
     }
 
     if (this.pendingEvents.length >= MAX_QUEUE_SIZE) {
